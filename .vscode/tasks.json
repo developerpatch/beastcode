@@ -1,0 +1,147 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Flutter: Pub get (watch pubspec.yaml)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ".scripts/dev.ps1",
+        "-WatchPubspec"
+      ],
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "ADB: Install debug APK (force replace)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ".scripts/dev.ps1",
+        "-InstallApk"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Flutter: Run (fast start)",
+      "type": "shell",
+      "command": "flutter",
+      "args": [
+        "run",
+        "--fast-start"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Flutter: Attach",
+      "type": "shell",
+      "command": "flutter",
+      "args": [
+        "attach"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ADB: Pair over Wi‑Fi",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ".scripts/dev.ps1",
+        "-Pair",
+        "-Ip",
+        "${input:deviceIp}",
+        "-Port",
+        "${input:pairPort}",
+        "-PairingCode",
+        "${input:pairCode}",
+        "-AdbPath",
+        "${input:adbPath}"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ADB: Connect (last device)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ".scripts/dev.ps1",
+        "-Connect"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ADB: Uninstall app (current appId)",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ".scripts/dev.ps1",
+        "-Uninstall"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ADB: Connect over Wi‑Fi",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        ".scripts/dev.ps1",
+        "-Connect",
+        "-Ip",
+        "${input:deviceIp}",
+        "-Port",
+        "${input:connectPort}",
+        "-AdbPath",
+        "${input:adbPath}"
+      ],
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "deviceIp",
+      "type": "promptString",
+      "description": "Device IP (e.g., 192.168.1.25)"
+    },
+    {
+      "id": "pairPort",
+      "type": "promptString",
+      "description": "Pairing port (Settings → Developer options → Wireless debugging)",
+      "default": "37099"
+    },
+    {
+      "id": "pairCode",
+      "type": "promptString",
+      "description": "Pairing code (6 digits from device)"
+    },
+    {
+      "id": "connectPort",
+      "type": "promptString",
+      "description": "Connect port (shows under Wireless debugging when paired)",
+      "default": "5555"
+    },
+    {
+      "id": "adbPath",
+      "type": "promptString",
+      "description": "Path to adb.exe (leave blank if already in PATH)",
+      "default": "C:\\Users\\%USERNAME%\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe"
+    }
+  ]
+}
