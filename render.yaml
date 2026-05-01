@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: beastcode-ytmusic-proxy
+    runtime: docker
+    rootDir: backend/ytmusic_proxy
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /healthz
+    envVars:
+      - key: YTM_BACKEND_API_KEY
+        sync: false
