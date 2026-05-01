@@ -28,7 +28,7 @@ WEB_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 )
-_AUDIO_URL_CACHE: dict[str, tuple[str, float]] = {}
+_AUDIO_URL_CACHE: dict[str, tuple[dict[str, Any], float]] = {}
 _AUDIO_URL_TTL_SECONDS = 8 * 60
 
 
@@ -461,7 +461,7 @@ def _validate_api_key(x_api_key: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-def _extract_audio_url(video_id: str) -> str:
+def _extract_audio_stream_info(video_id: str) -> dict[str, Any]:
     if yt_dlp is None:
         raise RuntimeError("yt-dlp is not installed")
     cached = _AUDIO_URL_CACHE.get(video_id)
@@ -482,8 +482,24 @@ def _extract_audio_url(video_id: str) -> str:
     audio_url = (info or {}).get("url") if isinstance(info, dict) else None
     if not audio_url:
         raise RuntimeError("No playable audio URL found")
-    _AUDIO_URL_CACHE[video_id] = (audio_url, now + _AUDIO_URL_TTL_SECONDS)
-    return audio_url
+    stream_headers = (info or {}).get("http_headers") if isinstance(info, dict) else None
+    if not isinstance(stream_headers, dict):
+        stream_headers = {}
+    clean_headers = {
+        str(key): str(value)
+        for key, value in stream_headers.items()
+        if key and value
+    }
+    stream_info = {
+        "url": audio_url,
+        "headers": clean_headers,
+    }
+    _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
+    return stream_info
+
+
+def _extract_audio_url(video_id: str) -> str:
+    return _extract_audio_stream_info(video_id)["url"]
 
 
 def _has_cached_audio_url(video_id: str) -> bool:
@@ -550,7 +566,7 @@ async def ytmusic_resolve(
 
     was_cached = _has_cached_audio_url(video_id)
     try:
-        await asyncio.to_thread(_extract_audio_url, video_id)
+        await asyncio.to_thread(_extract_audio_stream_info, video_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"audio resolve failed: {e}") from e
 
@@ -574,14 +590,25 @@ async def ytmusic_stream(
         raise HTTPException(status_code=400, detail="video_id is required")
 
     try:
-        audio_url = await asyncio.to_thread(_extract_audio_url, video_id)
+        stream_info = await asyncio.to_thread(_extract_audio_stream_info, video_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"audio resolve failed: {e}") from e
+    audio_url = str(stream_info.get("url") or "").strip()
+    upstream_headers = stream_info.get("headers")
+    if not audio_url:
+        raise HTTPException(status_code=502, detail="audio resolve failed: empty url")
+    if not isinstance(upstream_headers, dict):
+        upstream_headers = {}
 
     req_headers = {
-        "User-Agent": WEB_UA,
         "Accept": "*/*",
     }
+    for header_name in ("User-Agent", "Referer", "Origin", "Cookie"):
+        header_value = upstream_headers.get(header_name)
+        if header_value:
+            req_headers[header_name] = str(header_value)
+    if "User-Agent" not in req_headers:
+        req_headers["User-Agent"] = WEB_UA
     if range_header:
         req_headers["Range"] = range_header
 
