@@ -1781,6 +1781,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         headers: headers,
         timeout: const Duration(seconds: 12),
       );
+      await _warmYtMusicBackendStream(
+        baseUrl,
+        video.id.value,
+        headers: headers,
+      );
       final beastPlayed = await _tryPlayViaBeastClientStream(
         video,
         streamUri: streamUri,
@@ -2530,6 +2535,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return baseUri.replace(path: '$cleanBasePath/ytmusic/stream/$videoId');
   }
 
+  Uri? _backendAudioResolveUriForVideo(String baseUrl, String videoId) {
+    if (videoId.isEmpty) return null;
+    final baseUri = Uri.tryParse(baseUrl.trim());
+    if (baseUri == null || baseUri.host.isEmpty) return null;
+    final cleanBasePath = baseUri.path.endsWith('/')
+        ? baseUri.path.substring(0, baseUri.path.length - 1)
+        : baseUri.path;
+    return baseUri.replace(path: '$cleanBasePath/ytmusic/resolve/$videoId');
+  }
+
   Uri? _ytMusicBackendHealthUri(String baseUrl) {
     final baseUri = Uri.tryParse(baseUrl.trim());
     if (baseUri == null || baseUri.host.isEmpty) return null;
@@ -2564,6 +2579,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       debugPrint('[YTM BACKEND] wake ping ${response.statusCode} $healthUri');
     } catch (e) {
       debugPrint('[YTM BACKEND] wake ping failed: $e');
+    }
+  }
+
+  Future<void> _warmYtMusicBackendStream(
+    String baseUrl,
+    String videoId, {
+    Map<String, String>? headers,
+    Duration timeout = const Duration(seconds: 35),
+  }) async {
+    final resolveUri = _backendAudioResolveUriForVideo(baseUrl, videoId);
+    if (resolveUri == null) return;
+    try {
+      final response = await http
+          .get(resolveUri, headers: headers)
+          .timeout(timeout);
+      debugPrint(
+        '[YTM BACKEND] resolve warm ${response.statusCode} $resolveUri',
+      );
+    } catch (e) {
+      debugPrint('[YTM BACKEND] resolve warm failed: $e');
     }
   }
 

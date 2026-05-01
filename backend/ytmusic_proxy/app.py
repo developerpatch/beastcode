@@ -486,6 +486,11 @@ def _extract_audio_url(video_id: str) -> str:
     return audio_url
 
 
+def _has_cached_audio_url(video_id: str) -> bool:
+    cached = _AUDIO_URL_CACHE.get(video_id)
+    return bool(cached is not None and cached[1] > time.time())
+
+
 app = FastAPI(title=APP_TITLE, version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -530,6 +535,30 @@ async def ytmusic_home(
         "quickPicksLabel": data.get("quickPicksLabel", "From your YouTube Music Quick Picks"),
         "quickPicksFromOfficialShelf": bool(data.get("quickPicksFromOfficialShelf")),
         "shelves": data.get("shelves", []),
+    }
+
+
+@app.get("/ytmusic/resolve/{video_id}")
+async def ytmusic_resolve(
+    video_id: str,
+    x_api_key: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    _validate_api_key(x_api_key)
+    video_id = (video_id or "").strip()
+    if not video_id:
+        raise HTTPException(status_code=400, detail="video_id is required")
+
+    was_cached = _has_cached_audio_url(video_id)
+    try:
+        await asyncio.to_thread(_extract_audio_url, video_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"audio resolve failed: {e}") from e
+
+    return {
+        "ok": True,
+        "videoId": video_id,
+        "cached": was_cached,
+        "ttlSeconds": _AUDIO_URL_TTL_SECONDS,
     }
 
 
