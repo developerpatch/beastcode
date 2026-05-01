@@ -496,6 +496,8 @@ app.add_middleware(
 )
 
 
+@app.get("/")
+@app.get("/health")
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     return {"ok": True, "service": APP_TITLE}

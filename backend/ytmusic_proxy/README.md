@@ -80,6 +80,27 @@ This folder now includes:
 4. Set `YTM_BACKEND_API_KEY` if you want to lock the proxy down.
 5. After deploy, confirm `https://<your-service>/healthz` returns `{"ok":true,...}`.
 
+### Keepalive pings
+
+If you want extra scheduled traffic hitting the service, this repo includes a GitHub Actions workflow at `.github/workflows/render-keepalive.yml`.
+
+It sends pings on three schedules:
+- every 5 minutes
+- every 7 minutes with an offset
+- every 10 minutes with an offset
+
+To enable it:
+
+1. Open your GitHub repo settings.
+2. Go to `Secrets and variables` -> `Actions`.
+3. Add `RENDER_KEEPALIVE_URL` with a value like `https://your-backend.onrender.com/healthz`.
+4. If your backend requires a key, also add `YTM_BACKEND_API_KEY` with the same value used on Render.
+5. Make sure GitHub Actions is enabled for the repository.
+
+Note:
+- Render `Starter` web services are already designed to stay on, so this is only an extra keepalive layer.
+- No host can realistically be guaranteed to stay up for "10000 years"; provider restarts and maintenance can still happen.
+
 ### Other hosts
 
 Any host that supports Docker works. The container starts `uvicorn` and listens on `${PORT}` when the platform provides one.

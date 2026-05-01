@@ -1769,11 +1769,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     Duration? seekPosition,
   }) async {
     if (!_shouldUseYtMusicBackend()) return false;
+    final baseUrl = _ytMusicBackendBaseUrl().trim();
+    if (baseUrl.isEmpty) return false;
     final streamUri = _backendAudioProxyUriForVideo(video.id.value);
     if (streamUri == null) return false;
     final apiKey = _effectiveYtMusicBackendApiKey();
     final headers = apiKey.isEmpty ? null : <String, String>{'x-api-key': apiKey};
     try {
+      await _wakeYtMusicBackendIfNeeded(
+        baseUrl,
+        headers: headers,
+        timeout: const Duration(seconds: 12),
+      );
       final beastPlayed = await _tryPlayViaBeastClientStream(
         video,
         streamUri: streamUri,
@@ -2523,6 +2530,96 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return baseUri.replace(path: '$cleanBasePath/ytmusic/stream/$videoId');
   }
 
+  Uri? _ytMusicBackendHealthUri(String baseUrl) {
+    final baseUri = Uri.tryParse(baseUrl.trim());
+    if (baseUri == null || baseUri.host.isEmpty) return null;
+    final cleanBasePath = baseUri.path.endsWith('/')
+        ? baseUri.path.substring(0, baseUri.path.length - 1)
+        : baseUri.path;
+    return baseUri.replace(path: '$cleanBasePath/healthz');
+  }
+
+  bool _isProbablyLocalBackend(Uri uri) {
+    final host = uri.host.toLowerCase();
+    return host == '127.0.0.1' ||
+        host == 'localhost' ||
+        host == '10.0.2.2' ||
+        host == '::1';
+  }
+
+  Future<void> _wakeYtMusicBackendIfNeeded(
+    String baseUrl, {
+    Map<String, String>? headers,
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    final baseUri = Uri.tryParse(baseUrl.trim());
+    final healthUri = _ytMusicBackendHealthUri(baseUrl);
+    if (baseUri == null || healthUri == null || _isProbablyLocalBackend(baseUri)) {
+      return;
+    }
+    try {
+      final response = await http
+          .get(healthUri, headers: headers)
+          .timeout(timeout);
+      debugPrint('[YTM BACKEND] wake ping ${response.statusCode} $healthUri');
+    } catch (e) {
+      debugPrint('[YTM BACKEND] wake ping failed: $e');
+    }
+  }
+
+  Future<http.Response?> _postYtMusicHomeWithWake({
+    required String baseUrl,
+    required Uri uri,
+    required Map<String, String> headers,
+    required Map<String, dynamic> body,
+  }) async {
+    final wakeHeaders = headers['x-api-key']?.trim().isNotEmpty == true
+        ? <String, String>{'x-api-key': headers['x-api-key']!.trim()}
+        : null;
+    const attemptTimeouts = <Duration>[
+      Duration(seconds: 8),
+      Duration(seconds: 16),
+      Duration(seconds: 28),
+    ];
+    const retryDelays = <Duration>[
+      Duration.zero,
+      Duration(seconds: 4),
+      Duration(seconds: 10),
+    ];
+    await _wakeYtMusicBackendIfNeeded(
+      baseUrl,
+      headers: wakeHeaders,
+      timeout: const Duration(seconds: 10),
+    );
+    for (var attempt = 0; attempt < attemptTimeouts.length; attempt++) {
+      if (retryDelays[attempt] > Duration.zero) {
+        await Future.delayed(retryDelays[attempt]);
+        await _wakeYtMusicBackendIfNeeded(
+          baseUrl,
+          headers: wakeHeaders,
+          timeout: const Duration(seconds: 15),
+        );
+      }
+      try {
+        final response = await http
+            .post(uri, headers: headers, body: jsonEncode(body))
+            .timeout(attemptTimeouts[attempt]);
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          return response;
+        }
+        debugPrint(
+          '[YTM BACKEND] attempt ${attempt + 1} failed ${response.statusCode}',
+        );
+        if (response.statusCode < 500 && response.statusCode != 429) {
+          return response;
+        }
+      } catch (e) {
+        debugPrint('[YTM BACKEND] attempt ${attempt + 1} error: $e');
+      }
+    }
+    return null;
+  }
+
   Video? _ytMusicVideoFromBackendPayload(dynamic raw) {
     final map = _jsonMap(raw);
     if (map == null) return null;
@@ -2620,15 +2717,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         'maxShelves': 18,
         'maxVideosPerShelf': 24,
       };
-      final response = await http
-          .post(uri, headers: headers, body: jsonEncode(body))
-          .timeout(const Duration(seconds: 5));
+      final response = await _postYtMusicHomeWithWake(
+        baseUrl: baseUrl,
+        uri: uri,
+        headers: headers,
+        body: body,
+      );
+      if (response == null) {
+        _ytMusicBackendRetryAfter =
+            DateTime.now().add(const Duration(seconds: 20));
+        return null;
+      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         debugPrint(
           '[YTM BACKEND] POST failed ${response.statusCode}: ${response.body.length > 220 ? response.body.substring(0, 220) : response.body}',
         );
         _ytMusicBackendRetryAfter =
-            DateTime.now().add(const Duration(minutes: 2));
+            DateTime.now().add(const Duration(seconds: 20));
         return null;
       }
       final json = _jsonMap(jsonDecode(response.body));
@@ -2697,7 +2802,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     } catch (e) {
       debugPrint('[YTM BACKEND] fetch error: $e');
       _ytMusicBackendRetryAfter =
-          DateTime.now().add(const Duration(minutes: 2));
+          DateTime.now().add(const Duration(seconds: 20));
       return null;
     }
   }
