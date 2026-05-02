@@ -9,3 +9,5 @@ services:
     envVars:
       - key: YTM_BACKEND_API_KEY
         sync: false
+      - key: YTM_BACKEND_COOKIE
+        sync: false

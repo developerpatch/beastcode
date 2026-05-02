@@ -24,6 +24,10 @@ except Exception:
 
 APP_TITLE = "YT Music Home Proxy"
 API_KEY = os.getenv("YTM_BACKEND_API_KEY", "").strip()
+AUDIO_COOKIE = (
+    os.getenv("YTM_BACKEND_COOKIE", "").strip()
+    or os.getenv("YTM_BACKEND_YOUTUBE_COOKIE", "").strip()
+)
 WEB_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
@@ -472,41 +476,67 @@ def _extract_audio_stream_info(
     if cached is not None and cached[1] > now:
         return cached[0]
 
-    ydl_opts = {
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+    cookie = (raw_cookie or "").strip() or AUDIO_COOKIE
+    base_opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
         "format": "bestaudio[ext=m4a]/bestaudio",
     }
-    cookie = (raw_cookie or "").strip()
     if cookie:
-        ydl_opts["http_headers"] = {
+        base_opts["http_headers"] = {
             "Cookie": cookie,
             "Origin": "https://music.youtube.com",
             "Referer": "https://music.youtube.com/",
             "User-Agent": WEB_UA,
         }
-    watch_url = f"https://www.youtube.com/watch?v={video_id}"
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(watch_url, download=False)
-    audio_url = (info or {}).get("url") if isinstance(info, dict) else None
-    if not audio_url:
-        raise RuntimeError("No playable audio URL found")
-    stream_headers = (info or {}).get("http_headers") if isinstance(info, dict) else None
-    if not isinstance(stream_headers, dict):
-        stream_headers = {}
-    clean_headers = {
-        str(key): str(value)
-        for key, value in stream_headers.items()
-        if key and value
-    }
-    stream_info = {
-        "url": audio_url,
-        "headers": clean_headers,
-    }
-    _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
-    return stream_info
+
+    attempts = [
+        {
+            **base_opts,
+            "extractor_args": {
+                "youtube": {"player_client": ["android_music", "android"]}
+            },
+        },
+        {
+            **base_opts,
+            "extractor_args": {
+                "youtube": {"player_client": ["tv_embedded", "android_creator", "web"]}
+            },
+        },
+        base_opts,
+    ]
+
+    last_error: Optional[Exception] = None
+    for ydl_opts in attempts:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(watch_url, download=False)
+            audio_url = (info or {}).get("url") if isinstance(info, dict) else None
+            if not audio_url:
+                raise RuntimeError("No playable audio URL found")
+            stream_headers = (
+                (info or {}).get("http_headers") if isinstance(info, dict) else None
+            )
+            if not isinstance(stream_headers, dict):
+                stream_headers = {}
+            clean_headers = {
+                str(key): str(value)
+                for key, value in stream_headers.items()
+                if key and value
+            }
+            stream_info = {
+                "url": audio_url,
+                "headers": clean_headers,
+            }
+            _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
+            return stream_info
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"Could not resolve playable audio: {last_error}")
 
 
 def _extract_audio_url(video_id: str) -> str:

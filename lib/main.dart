@@ -1793,19 +1793,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         headers: headers,
         timeout: const Duration(seconds: 12),
       );
-      await _warmYtMusicBackendStream(
+      final resolveReady = await _warmYtMusicBackendStream(
         baseUrl,
         video.id.value,
         headers: headers,
       );
-      final beastPlayed = await _tryPlayViaBeastClientStream(
-        video,
-        streamUri: streamUri,
-        headers: headers,
-        autoPlay: autoPlay,
-        seekPosition: seekPosition,
-      );
-      if (beastPlayed) return true;
+      if (!resolveReady) return false;
+      // Backend proxy playback is more reliable through the primary player than
+      // the BeastClient transport layer for hosted HTTP streams.
       await _setPlayerSource(
         AudioSource.uri(
           streamUri,
@@ -2594,14 +2589,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _warmYtMusicBackendStream(
+  Future<bool> _warmYtMusicBackendStream(
     String baseUrl,
     String videoId, {
     Map<String, String>? headers,
     Duration timeout = const Duration(seconds: 35),
   }) async {
     final resolveUri = _backendAudioResolveUriForVideo(baseUrl, videoId);
-    if (resolveUri == null) return;
+    if (resolveUri == null) return false;
     try {
       final response = await http
           .get(resolveUri, headers: headers)
@@ -2609,8 +2604,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       debugPrint(
         '[YTM BACKEND] resolve warm ${response.statusCode} $resolveUri',
       );
+      return response.statusCode >= 200 && response.statusCode < 300;
     } catch (e) {
       debugPrint('[YTM BACKEND] resolve warm failed: $e');
+      return false;
     }
   }
 
