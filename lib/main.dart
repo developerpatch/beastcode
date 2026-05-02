@@ -1609,6 +1609,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _playGaplessFromCache(Video video, int index) async {
+    if (_shouldUseYtMusicBackend()) {
+      await _play(video, index);
+      return;
+    }
     final videoId = video.id.value;
     final cached = _tmpFiles[videoId];
     if (cached == null || !await File(cached).exists()) {
@@ -1870,6 +1874,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     required bool autoPlay,
     Duration? seekPosition,
   }) async {
+    if (_shouldUseYtMusicBackend()) return false;
     final videoId = video.id.value;
     final result = await _fetchManifest(videoId, silent: true, fast: true);
     if (result == null) return false;
@@ -1920,6 +1925,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     required bool autoPlay,
     Duration? seekPosition,
   }) async {
+    if (_shouldUseYtMusicBackend()) return false;
     final videoId = video.id.value;
     try {
       final result = await _fetchManifest(videoId, silent: true, fast: true);
@@ -2601,8 +2607,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final response = await http
           .get(resolveUri, headers: headers)
           .timeout(timeout);
+      var suffix = '';
+      try {
+        final body = jsonDecode(response.body);
+        if (body is Map<String, dynamic>) {
+          final source = (body['source'] ?? '').toString().trim();
+          final detail = (body['detail'] ?? '').toString().trim();
+          if (source.isNotEmpty) {
+            suffix = ' source=$source';
+          } else if (detail.isNotEmpty) {
+            suffix = ' detail=$detail';
+          }
+        }
+      } catch (_) {}
       debugPrint(
-        '[YTM BACKEND] resolve warm ${response.statusCode} $resolveUri',
+        '[YTM BACKEND] resolve warm ${response.statusCode} $resolveUri$suffix',
       );
       return response.statusCode >= 200 && response.statusCode < 300;
     } catch (e) {
@@ -10401,44 +10420,46 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       unawaited(_generateDailyMixes());
     }
 
-    // Serve from cache
+    // Serve from cache only when the app is allowed to resolve streams locally.
     final cached = _tmpFiles[videoId];
-    if (cached != null && await File(cached).exists()) {
-      if (_currentVideoId != videoId) return;
-      if (mounted) setState(() => _bufferLabel = 'Starting...');
-      bool cacheSuccess = true;
-      try {
-        await _setPlayerSource(
-          AudioSource.uri(
-            Uri.file(cached),
-            tag: _mediaItemForVideo(video, cached),
-          ),
-        );
-        await _player.setSpeed(_playbackSpeed);
-        await _applyNormalizationForPlayer(_player, video);
-        if (mounted && _currentVideoId == videoId) {
-          setState(() => _isBuffering = false);
-        }
-        if (seekPosition != null) {
-          await _player.seek(seekPosition);
-        }
-        if (_currentVideoId == videoId) {
-          if (autoPlay) {
-            await _startPrimaryPlayback();
-          } else {
-            await _player.pause();
+    if (!_shouldUseYtMusicBackend()) {
+      if (cached != null && await File(cached).exists()) {
+        if (_currentVideoId != videoId) return;
+        if (mounted) setState(() => _bufferLabel = 'Starting...');
+        bool cacheSuccess = true;
+        try {
+          await _setPlayerSource(
+            AudioSource.uri(
+              Uri.file(cached),
+              tag: _mediaItemForVideo(video, cached),
+            ),
+          );
+          await _player.setSpeed(_playbackSpeed);
+          await _applyNormalizationForPlayer(_player, video);
+          if (mounted && _currentVideoId == videoId) {
+            setState(() => _isBuffering = false);
           }
+          if (seekPosition != null) {
+            await _player.seek(seekPosition);
+          }
+          if (_currentVideoId == videoId) {
+            if (autoPlay) {
+              await _startPrimaryPlayback();
+            } else {
+              await _player.pause();
+            }
+          }
+          unawaited(_prefetchNext(index, videoId));
+        } catch (e) {
+          debugPrint('[Player cache] $e');
+          _tmpFiles.remove(videoId);
+          cacheSuccess = false;
+          // Fall through to re-fetch
         }
-        unawaited(_prefetchNext(index, videoId));
-      } catch (e) {
-        debugPrint('[Player cache] $e');
-        _tmpFiles.remove(videoId);
-        cacheSuccess = false;
-        // Fall through to re-fetch
+        if (cacheSuccess) return;
       }
-      if (cacheSuccess) return;
+      _tmpFiles.remove(videoId);
     }
-    _tmpFiles.remove(videoId);
 
     try {
       if (_shouldUseYtMusicBackend()) {
@@ -10458,6 +10479,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           unawaited(_prefetchNext(index, videoId));
           return;
         }
+        throw Exception(
+          'Backend playback failed for $videoId. Check /ytmusic/resolve on the configured backend.',
+        );
       } else if (mounted && _currentVideoId == videoId) {
         setState(() => _bufferLabel = 'Resolving stream on device...');
       }
@@ -10530,7 +10554,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       unawaited(_prefetchNext(index, videoId));
     } catch (e) {
       debugPrint('[Play] failed: $e');
-      if (_currentVideoId == videoId && _isRecoverableSourceError(e)) {
+      if (_currentVideoId == videoId &&
+          !_shouldUseYtMusicBackend() &&
+          _isRecoverableSourceError(e)) {
         if (mounted) {
           setState(() {
             _bufferLabel = 'Reconnecting stream...';
@@ -10604,6 +10630,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   // Prefetch
   Future<void> _prefetchNext(int fromIndex, String forVideoId) async {
+    if (_shouldUseYtMusicBackend()) return;
     if (_prefetchRunning) return;
     _prefetchRunning = true;
     _prefetchForVideoId = forVideoId;

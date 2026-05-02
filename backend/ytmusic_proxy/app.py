@@ -51,6 +51,13 @@ WEB_UA = (
 )
 _AUDIO_URL_CACHE: dict[str, tuple[dict[str, Any], float]] = {}
 _AUDIO_URL_TTL_SECONDS = 8 * 60
+_YT_DLP_CLIENT_ATTEMPTS: list[tuple[str, Optional[list[str]]]] = [
+    ("auto", None),
+    ("android_vr", ["android_vr"]),
+    ("android_ios", ["android", "ios"]),
+    ("web_music_mweb", ["web_music", "mweb"]),
+    ("web_embedded", ["web_embedded", "web"]),
+]
 
 
 class HomeRequest(BaseModel):
@@ -244,6 +251,130 @@ def _pick_best_audio_format(formats: list[dict[str, Any]]) -> Optional[dict[str,
         reverse=True,
     )
     return audio_formats[0]
+
+
+def _audio_info_from_ytdlp_result(
+    info: dict[str, Any],
+    source: str,
+) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for raw in (
+        info,
+        *(
+            (info.get("requested_downloads") or [])
+            if isinstance(info.get("requested_downloads"), list)
+            else []
+        ),
+        *(
+            (info.get("requested_formats") or [])
+            if isinstance(info.get("requested_formats"), list)
+            else []
+        ),
+        *(
+            (info.get("formats") or [])
+            if isinstance(info.get("formats"), list)
+            else []
+        ),
+    ):
+        if not isinstance(raw, dict):
+            continue
+        url = _first_non_empty(raw.get("url"))
+        if not url:
+            continue
+        mime_type = _first_non_empty(
+            raw.get("mimeType") or raw.get("mimetype")
+        ).lower()
+        acodec = _first_non_empty(raw.get("acodec")).lower()
+        vcodec = _first_non_empty(raw.get("vcodec")).lower()
+        if mime_type and "audio/" not in mime_type:
+            continue
+        if acodec == "none":
+            continue
+        if vcodec and vcodec != "none":
+            continue
+        candidates.append(raw)
+    if not candidates:
+        raise RuntimeError("No playable audio URL found")
+    candidates.sort(
+        key=lambda item: (
+            int(_first_non_empty(item.get("ext")).lower() in {"m4a", "mp4"}),
+            int(item.get("abr") or 0),
+            int(item.get("tbr") or 0),
+            int(item.get("filesize") or item.get("filesize_approx") or 0),
+        ),
+        reverse=True,
+    )
+    chosen = candidates[0]
+    info_headers = info.get("http_headers") if isinstance(info, dict) else None
+    chosen_headers = chosen.get("http_headers") if isinstance(chosen, dict) else None
+    merged_headers: dict[str, Any] = {}
+    if isinstance(info_headers, dict):
+        merged_headers.update(info_headers)
+    if isinstance(chosen_headers, dict):
+        merged_headers.update(chosen_headers)
+    clean_headers = {
+        str(key): str(value)
+        for key, value in merged_headers.items()
+        if key and value
+    }
+    if "User-Agent" not in clean_headers:
+        clean_headers["User-Agent"] = WEB_UA
+    return {
+        "url": _first_non_empty(chosen.get("url")),
+        "headers": clean_headers,
+        "source": source,
+        "formatId": _first_non_empty(chosen.get("format_id")),
+        "ext": _first_non_empty(chosen.get("ext")),
+    }
+
+
+def _extract_audio_stream_info_via_ytdlp(
+    video_id: str,
+    raw_cookie: Optional[str] = None,
+) -> dict[str, Any]:
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp is not installed")
+
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+    cookiefile = _build_cookiefile((raw_cookie or "").strip())
+    base_opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "format": "bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio",
+        "http_headers": {
+            "Origin": "https://music.youtube.com",
+            "Referer": "https://music.youtube.com/",
+            "User-Agent": WEB_UA,
+        },
+    }
+    if cookiefile:
+        base_opts["cookiefile"] = cookiefile
+
+    errors: list[str] = []
+    try:
+        for label, clients in _YT_DLP_CLIENT_ATTEMPTS:
+            ydl_opts = dict(base_opts)
+            if clients is not None:
+                ydl_opts["extractor_args"] = {
+                    "youtube": {"player_client": clients}
+                }
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(watch_url, download=False)
+                if not isinstance(info, dict):
+                    raise RuntimeError("yt-dlp returned no metadata")
+                return _audio_info_from_ytdlp_result(info, f"yt-dlp:{label}")
+            except Exception as exc:
+                errors.append(f"{label}={exc}")
+    finally:
+        if cookiefile:
+            try:
+                os.remove(cookiefile)
+            except OSError:
+                pass
+    raise RuntimeError("; ".join(errors) or "yt-dlp returned no playable audio")
 
 
 def _extract_audio_stream_info_via_youtubei(video_id: str) -> dict[str, Any]:
@@ -755,114 +886,38 @@ def _extract_audio_stream_info(
     video_id: str,
     raw_cookie: Optional[str] = None,
 ) -> dict[str, Any]:
-    if yt_dlp is None:
-        raise RuntimeError("yt-dlp is not installed")
     cached = _AUDIO_URL_CACHE.get(video_id)
     now = time.time()
     if cached is not None and cached[1] > now:
         return cached[0]
 
-    watch_url = f"https://www.youtube.com/watch?v={video_id}"
     cookie = (raw_cookie or "").strip() or AUDIO_COOKIE
-    if not cookie:
-        youtubei_error: Optional[Exception] = None
-        try:
-            stream_info = _extract_audio_stream_info_via_youtubei(video_id)
-            _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
-            return stream_info
-        except Exception as exc:
-            youtubei_error = exc
-        try:
-            stream_info = _extract_audio_stream_info_via_invidious(video_id)
-            _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
-            return stream_info
-        except Exception as fallback_error:
-            raise RuntimeError(
-                f"Could not resolve playable audio without cookies: "
-                f"youtubei={youtubei_error}; invidious={fallback_error}"
-            ) from fallback_error
+    errors: list[str] = []
 
-    cookiefile = _build_cookiefile(cookie)
-    base_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "skip_download": True,
-        "format": "bestaudio[ext=m4a]/bestaudio",
-    }
-    if cookiefile:
-        base_opts["cookiefile"] = cookiefile
-    base_opts["http_headers"] = {
-        "Origin": "https://music.youtube.com",
-        "Referer": "https://music.youtube.com/",
-        "User-Agent": WEB_UA,
-    }
-
-    attempts = [
-        {
-            **base_opts,
-            "extractor_args": {
-                "youtube": {"player_client": ["android_vr", "android", "ios"]}
-            },
-        },
-        {
-            **base_opts,
-            "extractor_args": {
-                "youtube": {"player_client": ["tv_embedded", "android_creator", "web"]}
-            },
-        },
-        base_opts,
-    ]
-
-    last_error: Optional[Exception] = None
     try:
-        for ydl_opts in attempts:
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(watch_url, download=False)
-                audio_url = (info or {}).get("url") if isinstance(info, dict) else None
-                if not audio_url:
-                    raise RuntimeError("No playable audio URL found")
-                stream_headers = (
-                    (info or {}).get("http_headers") if isinstance(info, dict) else None
-                )
-                if not isinstance(stream_headers, dict):
-                    stream_headers = {}
-                clean_headers = {
-                    str(key): str(value)
-                    for key, value in stream_headers.items()
-                    if key and value
-                }
-                stream_info = {
-                    "url": audio_url,
-                    "headers": clean_headers,
-                }
-                _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
-                return stream_info
-            except Exception as exc:
-                last_error = exc
-    finally:
-        if cookiefile:
-            try:
-                os.remove(cookiefile)
-            except OSError:
-                pass
+        stream_info = _extract_audio_stream_info_via_ytdlp(video_id, cookie)
+        _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
+        return stream_info
+    except Exception as exc:
+        errors.append(f"yt-dlp={exc}")
 
     try:
         stream_info = _extract_audio_stream_info_via_youtubei(video_id)
         _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
         return stream_info
-    except Exception as youtubei_error:
-        try:
-            stream_info = _extract_audio_stream_info_via_invidious(video_id)
-            _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
-            return stream_info
-        except Exception as fallback_error:
-            raise RuntimeError(
-                "Could not resolve playable audio: "
-                f"yt-dlp={last_error}; youtubei={youtubei_error}; "
-                f"invidious={fallback_error}"
-            ) from fallback_error
+    except Exception as exc:
+        errors.append(f"youtubei={exc}")
+
+    try:
+        stream_info = _extract_audio_stream_info_via_invidious(video_id)
+        _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
+        return stream_info
+    except Exception as exc:
+        errors.append(f"invidious={exc}")
+
+    raise RuntimeError(
+        "Could not resolve playable audio: " + "; ".join(errors)
+    )
 
 
 def _extract_audio_url(video_id: str) -> str:
@@ -941,7 +996,11 @@ async def ytmusic_resolve(
 
     was_cached = _has_cached_audio_url(video_id)
     try:
-        await asyncio.to_thread(_extract_audio_stream_info, video_id, x_ytmusic_cookie)
+        stream_info = await asyncio.to_thread(
+            _extract_audio_stream_info,
+            video_id,
+            x_ytmusic_cookie,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"audio resolve failed: {e}") from e
 
@@ -950,6 +1009,9 @@ async def ytmusic_resolve(
         "videoId": video_id,
         "cached": was_cached,
         "ttlSeconds": _AUDIO_URL_TTL_SECONDS,
+        "source": _first_non_empty(stream_info.get("source")),
+        "formatId": _first_non_empty(stream_info.get("formatId")),
+        "ext": _first_non_empty(stream_info.get("ext")),
     }
 
 
