@@ -554,10 +554,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   static const String _ytMusicWebRemixClientHeaderName = '67';
   static const String _ytMusicWebRemixClientName = 'WEB_REMIX';
   static const String _ytMusicWebRemixClientVersion = '1.20250305.01.00';
-  static const String _ytMusicBackendUrl =
-      String.fromEnvironment('YTM_BACKEND_URL', defaultValue: '');
-  static const String _ytMusicBackendApiKey =
-      String.fromEnvironment('YTM_BACKEND_API_KEY', defaultValue: '');
+  static const String _ytMusicBackendUrl = String.fromEnvironment(
+    'YTM_BACKEND_URL',
+    defaultValue: 'https://beastcode-ytmusic-proxy.onrender.com',
+  );
+  static const String _ytMusicBackendApiKey = String.fromEnvironment(
+    'YTM_BACKEND_API_KEY',
+    defaultValue: 'aadhya',
+  );
   // ignore: prefer_final_fields
   bool _strictYtMusicFeedMode = true;
   static const String _googleCloudConsoleUrl =

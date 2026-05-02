@@ -4,7 +4,7 @@ import re
 import time
 from typing import Any, Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -522,6 +522,13 @@ app.add_middleware(
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     return {"ok": True, "service": APP_TITLE}
+
+
+@app.head("/")
+@app.head("/health")
+@app.head("/healthz")
+async def healthz_head() -> Response:
+    return Response(status_code=200)
 
 
 @app.post("/ytmusic/home")
