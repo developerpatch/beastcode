@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import tempfile
 import time
 from typing import Any, Optional
 
@@ -28,6 +29,7 @@ AUDIO_COOKIE = (
     os.getenv("YTM_BACKEND_COOKIE", "").strip()
     or os.getenv("YTM_BACKEND_YOUTUBE_COOKIE", "").strip()
 )
+YOUTUBEI_API_KEY = "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI"
 WEB_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
@@ -66,6 +68,198 @@ def _parse_cookie_header(raw_cookie: str) -> dict[str, str]:
             continue
         out[key] = value
     return out
+
+
+def _build_cookiefile(raw_cookie: str) -> Optional[str]:
+    cookies = _parse_cookie_header(raw_cookie)
+    if not cookies:
+        return None
+
+    # yt-dlp authenticates more reliably with a Netscape cookie file than a
+    # raw Cookie header for YouTube bot-check flows.
+    domains = [
+        ".youtube.com",
+        ".music.youtube.com",
+        ".youtubei.googleapis.com",
+        ".google.com",
+    ]
+    expires = str(int(time.time()) + 30 * 24 * 60 * 60)
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".cookies.txt",
+        delete=False,
+    )
+    try:
+        handle.write("# Netscape HTTP Cookie File\n")
+        for name, value in cookies.items():
+            secure = "TRUE"
+            for domain in domains:
+                handle.write(
+                    "\t".join(
+                        [domain, "TRUE", "/", secure, expires, name, value]
+                    )
+                    + "\n"
+                )
+        handle.flush()
+        return handle.name
+    finally:
+        handle.close()
+
+
+def _youtubei_clients() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "ANDROID_MUSIC",
+            "version": "7.30.52",
+            "client_header": "21",
+            "user_agent": (
+                "com.google.android.apps.youtube.music/7.30.52 "
+                "(Linux; U; Android 12) gzip"
+            ),
+            "context": {
+                "clientName": "ANDROID_MUSIC",
+                "clientVersion": "7.30.52",
+                "androidSdkVersion": 31,
+                "osName": "Android",
+                "osVersion": "12",
+                "platform": "MOBILE",
+                "hl": "en",
+                "gl": "US",
+            },
+        },
+        {
+            "name": "ANDROID",
+            "version": "17.31.35",
+            "client_header": "3",
+            "user_agent": (
+                "com.google.android.youtube/17.31.35 "
+                "(Linux; U; Android 12) gzip"
+            ),
+            "context": {
+                "clientName": "ANDROID",
+                "clientVersion": "17.31.35",
+                "androidSdkVersion": 31,
+                "osName": "Android",
+                "osVersion": "12",
+                "platform": "MOBILE",
+                "hl": "en",
+                "gl": "US",
+            },
+        },
+        {
+            "name": "IOS",
+            "version": "19.09.3",
+            "client_header": "5",
+            "user_agent": "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_0 like Mac OS X)",
+            "context": {
+                "clientName": "IOS",
+                "clientVersion": "19.09.3",
+                "deviceMake": "Apple",
+                "deviceModel": "iPhone16,2",
+                "osName": "iPhone",
+                "osVersion": "17.0.0.21A329",
+                "platform": "MOBILE",
+                "hl": "en",
+                "gl": "US",
+            },
+        },
+        {
+            "name": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+            "version": "2.0",
+            "client_header": "85",
+            "user_agent": "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+            "context": {
+                "clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                "clientVersion": "2.0",
+                "screenWidthPoints": 1920,
+                "screenHeightPoints": 1080,
+                "screenPixelDensity": 1,
+                "platform": "TV",
+                "hl": "en",
+                "gl": "US",
+            },
+            "extra_body": {"thirdParty": {"embedUrl": "https://www.youtube.com/"}},
+        },
+    ]
+
+
+def _pick_best_audio_format(formats: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    audio_formats: list[dict[str, Any]] = []
+    for item in formats:
+        if not isinstance(item, dict):
+            continue
+        mime_type = _first_non_empty(item.get("mimeType")).lower()
+        if "audio/" not in mime_type:
+            continue
+        if _first_non_empty(item.get("url")).strip():
+            audio_formats.append(item)
+    if not audio_formats:
+        return None
+    audio_formats.sort(
+        key=lambda item: (
+            int(item.get("bitrate") or 0),
+            int(item.get("audioQuality", "AUDIO_QUALITY_LOW").endswith("HIGH")),
+        ),
+        reverse=True,
+    )
+    return audio_formats[0]
+
+
+def _extract_audio_stream_info_via_youtubei(video_id: str) -> dict[str, Any]:
+    endpoint = (
+        f"https://www.youtube.com/youtubei/v1/player?key={YOUTUBEI_API_KEY}"
+    )
+    last_error: Optional[str] = None
+    for client in _youtubei_clients():
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": str(client["user_agent"]),
+            "X-YouTube-Client-Name": str(client["client_header"]),
+            "X-YouTube-Client-Version": str(client["version"]),
+        }
+        body: dict[str, Any] = {
+            "videoId": video_id,
+            "contentCheckOk": True,
+            "racyCheckOk": True,
+            "context": {"client": dict(client["context"])},
+        }
+        extra_body = client.get("extra_body")
+        if isinstance(extra_body, dict):
+            body.update(extra_body)
+        try:
+            response = httpx.post(endpoint, headers=headers, json=body, timeout=20.0)
+            response.raise_for_status()
+            payload = response.json()
+            streaming_data = payload.get("streamingData")
+            if not isinstance(streaming_data, dict):
+                last_error = str(payload.get("playabilityStatus") or "missing streamingData")
+                continue
+            all_formats = []
+            for key in ("adaptiveFormats", "formats"):
+                value = streaming_data.get(key)
+                if isinstance(value, list):
+                    all_formats.extend(value)
+            chosen = _pick_best_audio_format(all_formats)
+            if chosen is None:
+                last_error = "no direct audio format returned"
+                continue
+            audio_url = _first_non_empty(chosen.get("url"))
+            if not audio_url:
+                last_error = "audio format missing url"
+                continue
+            return {
+                "url": audio_url,
+                "headers": {
+                    "User-Agent": str(client["user_agent"]),
+                    "Origin": "https://www.youtube.com",
+                    "Referer": "https://www.youtube.com/",
+                },
+                "source": f"youtubei:{client['name']}",
+            }
+        except Exception as exc:
+            last_error = str(exc)
+    raise RuntimeError(f"Could not resolve via youtubei: {last_error}")
 
 
 def _quick_score(title: str) -> int:
@@ -478,6 +672,7 @@ def _extract_audio_stream_info(
 
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
     cookie = (raw_cookie or "").strip() or AUDIO_COOKIE
+    cookiefile = _build_cookiefile(cookie)
     base_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -485,9 +680,10 @@ def _extract_audio_stream_info(
         "skip_download": True,
         "format": "bestaudio[ext=m4a]/bestaudio",
     }
+    if cookiefile:
+        base_opts["cookiefile"] = cookiefile
     if cookie:
         base_opts["http_headers"] = {
-            "Cookie": cookie,
             "Origin": "https://music.youtube.com",
             "Referer": "https://music.youtube.com/",
             "User-Agent": WEB_UA,
@@ -510,33 +706,47 @@ def _extract_audio_stream_info(
     ]
 
     last_error: Optional[Exception] = None
-    for ydl_opts in attempts:
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(watch_url, download=False)
-            audio_url = (info or {}).get("url") if isinstance(info, dict) else None
-            if not audio_url:
-                raise RuntimeError("No playable audio URL found")
-            stream_headers = (
-                (info or {}).get("http_headers") if isinstance(info, dict) else None
-            )
-            if not isinstance(stream_headers, dict):
-                stream_headers = {}
-            clean_headers = {
-                str(key): str(value)
-                for key, value in stream_headers.items()
-                if key and value
-            }
-            stream_info = {
-                "url": audio_url,
-                "headers": clean_headers,
-            }
-            _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
-            return stream_info
-        except Exception as exc:
-            last_error = exc
+    try:
+        for ydl_opts in attempts:
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(watch_url, download=False)
+                audio_url = (info or {}).get("url") if isinstance(info, dict) else None
+                if not audio_url:
+                    raise RuntimeError("No playable audio URL found")
+                stream_headers = (
+                    (info or {}).get("http_headers") if isinstance(info, dict) else None
+                )
+                if not isinstance(stream_headers, dict):
+                    stream_headers = {}
+                clean_headers = {
+                    str(key): str(value)
+                    for key, value in stream_headers.items()
+                    if key and value
+                }
+                stream_info = {
+                    "url": audio_url,
+                    "headers": clean_headers,
+                }
+                _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
+                return stream_info
+            except Exception as exc:
+                last_error = exc
+    finally:
+        if cookiefile:
+            try:
+                os.remove(cookiefile)
+            except OSError:
+                pass
 
-    raise RuntimeError(f"Could not resolve playable audio: {last_error}")
+    try:
+        stream_info = _extract_audio_stream_info_via_youtubei(video_id)
+        _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
+        return stream_info
+    except Exception as fallback_error:
+        raise RuntimeError(
+            f"Could not resolve playable audio: yt-dlp={last_error}; youtubei={fallback_error}"
+        ) from fallback_error
 
 
 def _extract_audio_url(video_id: str) -> str:
