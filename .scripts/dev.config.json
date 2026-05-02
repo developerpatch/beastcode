@@ -1,6 +1,6 @@
 ﻿{
     "ip":  "192.168.29.83",
     "pairingPort":  37099,
-    "connectPort":  40335,
+    "connectPort":  41621,
     "adbPath":  "C:\\Users\\%USERNAME%\\AppData\\Local\\Android\\Sdk\\platform-tools\\adb.exe"
 }

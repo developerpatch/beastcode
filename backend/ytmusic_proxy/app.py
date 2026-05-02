@@ -461,7 +461,10 @@ def _validate_api_key(x_api_key: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-def _extract_audio_stream_info(video_id: str) -> dict[str, Any]:
+def _extract_audio_stream_info(
+    video_id: str,
+    raw_cookie: Optional[str] = None,
+) -> dict[str, Any]:
     if yt_dlp is None:
         raise RuntimeError("yt-dlp is not installed")
     cached = _AUDIO_URL_CACHE.get(video_id)
@@ -476,6 +479,14 @@ def _extract_audio_stream_info(video_id: str) -> dict[str, Any]:
         "skip_download": True,
         "format": "bestaudio[ext=m4a]/bestaudio",
     }
+    cookie = (raw_cookie or "").strip()
+    if cookie:
+        ydl_opts["http_headers"] = {
+            "Cookie": cookie,
+            "Origin": "https://music.youtube.com",
+            "Referer": "https://music.youtube.com/",
+            "User-Agent": WEB_UA,
+        }
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(watch_url, download=False)
@@ -565,6 +576,7 @@ async def ytmusic_home(
 async def ytmusic_resolve(
     video_id: str,
     x_api_key: Optional[str] = Header(default=None),
+    x_ytmusic_cookie: Optional[str] = Header(default=None),
 ) -> dict[str, Any]:
     _validate_api_key(x_api_key)
     video_id = (video_id or "").strip()
@@ -573,7 +585,7 @@ async def ytmusic_resolve(
 
     was_cached = _has_cached_audio_url(video_id)
     try:
-        await asyncio.to_thread(_extract_audio_stream_info, video_id)
+        await asyncio.to_thread(_extract_audio_stream_info, video_id, x_ytmusic_cookie)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"audio resolve failed: {e}") from e
 
@@ -590,6 +602,7 @@ async def ytmusic_stream(
     video_id: str,
     range_header: Optional[str] = Header(default=None, alias="Range"),
     x_api_key: Optional[str] = Header(default=None),
+    x_ytmusic_cookie: Optional[str] = Header(default=None),
 ):
     _validate_api_key(x_api_key)
     video_id = (video_id or "").strip()
@@ -597,7 +610,11 @@ async def ytmusic_stream(
         raise HTTPException(status_code=400, detail="video_id is required")
 
     try:
-        stream_info = await asyncio.to_thread(_extract_audio_stream_info, video_id)
+        stream_info = await asyncio.to_thread(
+            _extract_audio_stream_info,
+            video_id,
+            x_ytmusic_cookie,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"audio resolve failed: {e}") from e
     audio_url = str(stream_info.get("url") or "").strip()

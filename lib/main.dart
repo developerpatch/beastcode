@@ -1778,7 +1778,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final streamUri = _backendAudioProxyUriForVideo(video.id.value);
     if (streamUri == null) return false;
     final apiKey = _effectiveYtMusicBackendApiKey();
-    final headers = apiKey.isEmpty ? null : <String, String>{'x-api-key': apiKey};
+    final rawCookie = _effectiveYtMusicCookie();
+    final backendHeaders = <String, String>{};
+    if (apiKey.isNotEmpty) {
+      backendHeaders['x-api-key'] = apiKey;
+    }
+    if (rawCookie.isNotEmpty) {
+      backendHeaders['x-ytmusic-cookie'] = rawCookie;
+    }
+    final headers = backendHeaders.isEmpty ? null : backendHeaders;
     try {
       await _wakeYtMusicBackendIfNeeded(
         baseUrl,
