@@ -30,6 +30,21 @@ AUDIO_COOKIE = (
     or os.getenv("YTM_BACKEND_YOUTUBE_COOKIE", "").strip()
 )
 YOUTUBEI_API_KEY = "AIzaSyAOghZGza2MQSZkY_zfZ370N-PUdXEo8AI"
+INVIDIOUS_INSTANCES = [
+    item.strip().rstrip("/")
+    for item in (
+        os.getenv("YTM_INVIDIOUS_INSTANCES", "").strip()
+        or ",".join(
+            [
+                "https://inv.nadeko.net",
+                "https://invidious.nerdvpn.de",
+                "https://inv.thepixora.com",
+                "https://yt.chocolatemoo53.com",
+            ]
+        )
+    ).split(",")
+    if item.strip()
+]
 WEB_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
@@ -285,6 +300,58 @@ def _extract_audio_stream_info_via_youtubei(video_id: str) -> dict[str, Any]:
         except Exception as exc:
             last_error = str(exc)
     raise RuntimeError(f"Could not resolve via youtubei: {last_error}")
+
+
+def _extract_audio_stream_info_via_invidious(video_id: str) -> dict[str, Any]:
+    last_error: Optional[str] = None
+    for instance in INVIDIOUS_INSTANCES:
+        endpoint = f"{instance}/api/v1/videos/{video_id}"
+        try:
+            response = httpx.get(
+                endpoint,
+                headers={"User-Agent": WEB_UA, "Accept": "application/json"},
+                timeout=20.0,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            adaptive = payload.get("adaptiveFormats")
+            if not isinstance(adaptive, list):
+                last_error = "adaptiveFormats missing"
+                continue
+            chosen = _pick_best_audio_format(
+                [
+                    {
+                        "mimeType": item.get("type"),
+                        "url": item.get("url"),
+                        "bitrate": item.get("bitrate"),
+                        "audioQuality": item.get("audioQuality"),
+                    }
+                    for item in adaptive
+                    if isinstance(item, dict)
+                ]
+            )
+            if chosen is None:
+                last_error = "no audio format returned"
+                continue
+            audio_url = _first_non_empty(chosen.get("url"))
+            if not audio_url:
+                last_error = "audio format missing url"
+                continue
+            if audio_url.startswith("/"):
+                audio_url = f"{instance}{audio_url}"
+            return {
+                "url": audio_url,
+                "headers": {
+                    "User-Agent": WEB_UA,
+                    "Origin": instance,
+                    "Referer": f"{instance}/watch?v={video_id}",
+                },
+                "source": f"invidious:{instance}",
+            }
+        except Exception as exc:
+            last_error = f"{instance}: {exc}"
+    raise RuntimeError(f"Could not resolve via invidious: {last_error}")
 
 
 def _quick_score(title: str) -> int:
@@ -697,6 +764,24 @@ def _extract_audio_stream_info(
 
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
     cookie = (raw_cookie or "").strip() or AUDIO_COOKIE
+    if not cookie:
+        youtubei_error: Optional[Exception] = None
+        try:
+            stream_info = _extract_audio_stream_info_via_youtubei(video_id)
+            _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
+            return stream_info
+        except Exception as exc:
+            youtubei_error = exc
+        try:
+            stream_info = _extract_audio_stream_info_via_invidious(video_id)
+            _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
+            return stream_info
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"Could not resolve playable audio without cookies: "
+                f"youtubei={youtubei_error}; invidious={fallback_error}"
+            ) from fallback_error
+
     cookiefile = _build_cookiefile(cookie)
     base_opts = {
         "quiet": True,
@@ -707,12 +792,11 @@ def _extract_audio_stream_info(
     }
     if cookiefile:
         base_opts["cookiefile"] = cookiefile
-    if cookie:
-        base_opts["http_headers"] = {
-            "Origin": "https://music.youtube.com",
-            "Referer": "https://music.youtube.com/",
-            "User-Agent": WEB_UA,
-        }
+    base_opts["http_headers"] = {
+        "Origin": "https://music.youtube.com",
+        "Referer": "https://music.youtube.com/",
+        "User-Agent": WEB_UA,
+    }
 
     attempts = [
         {
@@ -768,10 +852,17 @@ def _extract_audio_stream_info(
         stream_info = _extract_audio_stream_info_via_youtubei(video_id)
         _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
         return stream_info
-    except Exception as fallback_error:
-        raise RuntimeError(
-            f"Could not resolve playable audio: yt-dlp={last_error}; youtubei={fallback_error}"
-        ) from fallback_error
+    except Exception as youtubei_error:
+        try:
+            stream_info = _extract_audio_stream_info_via_invidious(video_id)
+            _AUDIO_URL_CACHE[video_id] = (stream_info, now + _AUDIO_URL_TTL_SECONDS)
+            return stream_info
+        except Exception as fallback_error:
+            raise RuntimeError(
+                "Could not resolve playable audio: "
+                f"yt-dlp={last_error}; youtubei={youtubei_error}; "
+                f"invidious={fallback_error}"
+            ) from fallback_error
 
 
 def _extract_audio_url(video_id: str) -> str:
