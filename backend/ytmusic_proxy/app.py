@@ -110,6 +110,27 @@ def _build_cookiefile(raw_cookie: str) -> Optional[str]:
 def _youtubei_clients() -> list[dict[str, Any]]:
     return [
         {
+            "name": "ANDROID_VR",
+            "version": "1.56.21",
+            "client_header": "28",
+            "user_agent": (
+                "com.google.android.apps.youtube.vr.oculus/1.56.21 "
+                "(Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+            ),
+            "context": {
+                "clientName": "ANDROID_VR",
+                "clientVersion": "1.56.21",
+                "deviceMake": "Oculus",
+                "deviceModel": "Quest 3",
+                "androidSdkVersion": 32,
+                "osName": "Android",
+                "osVersion": "12L",
+                "platform": "MOBILE",
+                "hl": "en",
+                "gl": "US",
+            },
+        },
+        {
             "name": "ANDROID_MUSIC",
             "version": "7.30.52",
             "client_header": "21",
@@ -198,6 +219,10 @@ def _pick_best_audio_format(formats: list[dict[str, Any]]) -> Optional[dict[str,
         return None
     audio_formats.sort(
         key=lambda item: (
+            int(
+                "mp4" in _first_non_empty(item.get("mimeType")).lower()
+                or "m4a" in _first_non_empty(item.get("mimeType")).lower()
+            ),
             int(item.get("bitrate") or 0),
             int(item.get("audioQuality", "AUDIO_QUALITY_LOW").endswith("HIGH")),
         ),
@@ -693,7 +718,7 @@ def _extract_audio_stream_info(
         {
             **base_opts,
             "extractor_args": {
-                "youtube": {"player_client": ["android_music", "android"]}
+                "youtube": {"player_client": ["android_vr", "android", "ios"]}
             },
         },
         {
